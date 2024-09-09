@@ -1,0 +1,247 @@
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include <DHT.h>
+#include <SoftwareSerial.h>
+
+// WiFi credentials
+const char *ssid = "Abhi";
+const char *password = "123456789";
+
+// Web server on port 80
+WebServer server(80);
+
+// DHT sensor configuration
+#define DHTTYPE DHT11
+#define DHTPIN 4
+DHT dht(DHTPIN, DHTTYPE);
+
+// Sensor thresholds
+const int soilMoistureThreshold = 4000;
+const int lightThreshold = 50;
+const int rainThreshold = 4095;
+const float tempLowerThreshold = 15.0;
+const float tempUpperThreshold = 30.0;
+const float humidityLowerThreshold = 30.0;
+const float humidityUpperThreshold = 100.0;
+
+// Define pins
+const int soilPin = 34;
+const int ldrPin = 35;
+const int rainSensorPin = 32;
+const int ledPin = 23;
+
+// GSM module pins
+const int gsmRXPin = 16; // ESP32 RX to GSM TX
+const int gsmTXPin = 17; // ESP32 TX to GSM RX
+SoftwareSerial gsmSerial(gsmRXPin, gsmTXPin);
+
+// Phone number for SMS and call
+const char *phoneNumber = "+917353431739"; // Replace with your phone number
+
+void handleRoot() {
+  char msg[2500];
+
+  float temperature = readDHTTemperature();
+  float humidity = readDHTHumidity();
+  int soilMoisture = readSoilMoisture();
+  int lightIntensity = readLDR();
+  int rainLevel = readRainSensor();
+
+  bool favorableForSowing = checkSeedSowingConditions(soilMoisture, lightIntensity, rainLevel, temperature, humidity);
+
+  snprintf(msg, 2500,
+           "<html>\
+  <head>\
+    <meta http-equiv='refresh' content='1'/>\
+    <meta name='viewport' content='width=device-width, initial-scale=1'>\
+    <link rel='stylesheet' href='https://use.fontawesome.com/releases/v5.7.2/css/all.css' integrity='sha384-fnmOCqbTlWIlj8LyTjo7mOUStjsKC4pOpQbqyi7RrhN7udi9RwhKkMHpvLbHG9Sr' crossorigin='anonymous'>\
+    <link href='https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap' rel='stylesheet'>\
+    <link href='https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600&display=swap' rel='stylesheet'>\
+    <title>ESP32 Sensor Server</title>\
+    <style>\
+    html { font-family: 'Open Sans', Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center;}\
+    h2 { font-size: 2.5rem; font-family: 'Roboto', sans-serif; color: #333;}\
+    p { font-size: 2.0rem; margin: 10px 0;}\
+    .units { font-size: 1.2rem; }\
+    .dht-labels { font-size: 1.5rem; vertical-align: middle; padding-bottom: 15px;}\
+    body { background-color: #f7f9fb; color: #333; margin: 0; padding: 20px;}\
+    .container { max-width: 600px; margin: 0 auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0, 0, 0, 0.1); }\
+    .icon { font-size: 1.5rem; margin-right: 10px; }\
+    </style>\
+  </head>\
+  <body>\
+    <div class='container'>\
+      <h2>SOWING TIME OPTIMIZATION</h2>\
+      <p>\
+        <i class='fas fa-thermometer-half icon' style='color:#ca3517;'></i>\
+        <span class='dht-labels'>Temperature</span>\
+        <span>%.2f</span>\
+        <sup class='units'>&deg;C</sup>\
+      </p>\
+      <p>\
+        <i class='fas fa-tint icon' style='color:#00add6;'></i>\
+        <span class='dht-labels'>Humidity</span>\
+        <span>%.2f</span>\
+        <sup class='units'>&percnt;</sup>\
+      </p>\
+      <p>\
+        <i class='fas fa-seedling icon' style='color:#00c853;'></i>\
+        <span class='dht-labels'>Soil Moisture</span>\
+        <span>%d</span>\
+      </p>\
+      <p>\
+        <i class='fas fa-sun icon' style='color:#ffeb3b;'></i>\
+        <span class='dht-labels'>Light Intensity</span>\
+        <span>%d</span>\
+      </p>\
+      <p>\
+        <i class='fas fa-cloud-rain icon' style='color:#00796b;'></i>\
+        <span class='dht-labels'>Rain Level</span>\
+        <span>%d</span>\
+      </p>\
+      <p>\
+        <span class='dht-labels'>Seed Sowing Condition: </span>\
+        <span>%s</span>\
+      </p>\
+    </div>\
+  </body>\
+</html>",
+           temperature, humidity, soilMoisture, lightIntensity, rainLevel,
+           favorableForSowing ? "Favorable" : "Not Favorable"
+          );
+  server.send(200, "text/html", msg);
+
+  // Check and act based on sowing conditions
+  if (favorableForSowing) {
+    sendSMS("It's a good time for sowing!");
+    makeCall();
+  }
+}
+
+void setup(void) {
+  Serial.begin(115200);
+  dht.begin();
+  
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  Serial.println("");
+
+  // Wait for connection
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.print("Connected to ");
+  Serial.println(ssid);
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+
+  if (MDNS.begin("esp32")) {
+    Serial.println("MDNS responder started");
+  }
+  server.on("/", handleRoot);
+
+  server.begin();
+  Serial.println("HTTP server started");
+
+  // Initialize the LED pin
+  pinMode(ledPin, OUTPUT);
+
+  // Initialize GSM module
+  gsmSerial.begin(9600);
+  delay(1000);
+}
+
+void loop(void) {
+  server.handleClient();
+  delay(2); // Allow the CPU to switch to other tasks
+}
+
+float readDHTTemperature() {
+  float t = dht.readTemperature();
+  if (isnan(t)) {    
+    Serial.println("Failed to read from DHT sensor!");
+    return -1;
+  } else {
+    Serial.println(t);
+    return t;
+  }
+}
+
+float readDHTHumidity() {
+  float h = dht.readHumidity();
+  if (isnan(h)) {
+    Serial.println("Failed to read from DHT sensor!");
+    return -1;
+  } else {
+    Serial.println(h);
+    return h;
+  }
+}
+
+int readSoilMoisture() {
+  int soilValue = analogRead(soilPin);
+  Serial.print("Soil Moisture Level: ");
+  Serial.println(soilValue);
+  return soilValue;
+}
+
+int readLDR() {
+  int ldrValue = analogRead(ldrPin);
+  Serial.print("Light Sensor Value: ");
+  Serial.println(ldrValue);
+  
+  // Control the LED based on the LDR value
+  if (ldrValue <= lightThreshold) {
+    digitalWrite(ledPin, HIGH);  // Turn the LED on
+  } else {
+    digitalWrite(ledPin, LOW);   // Turn the LED off
+  }
+  return ldrValue;
+}
+
+int readRainSensor() {
+  int rainValue = analogRead(rainSensorPin);
+  Serial.print("Rain Sensor Value: ");
+  Serial.println(rainValue);
+
+  if (rainValue < rainThreshold) {
+    Serial.println("It's raining!");
+  } else {
+    Serial.println("No rain detected.");
+  }
+  return rainValue;
+}
+
+bool checkSeedSowingConditions(int soilMoisture, int lightIntensity, int rain, float temperature, float humidity) {
+  if (soilMoisture > soilMoistureThreshold && 
+      lightIntensity > lightThreshold && 
+      rain < rainThreshold &&
+      temperature > tempLowerThreshold && temperature < tempUpperThreshold &&
+      humidity > humidityLowerThreshold && humidity < humidityUpperThreshold) {
+    return true;
+  }
+  return false;
+}
+
+void sendSMS(const char* message) {
+  gsmSerial.println("AT+CMGF=1"); // Set SMS to text mode
+  delay(1000);
+  gsmSerial.print("AT+CMGS=\"");
+  gsmSerial.print(phoneNumber);
+  gsmSerial.println("\"");
+  delay(1000);
+  gsmSerial.println(message);
+  delay(1000);
+  gsmSerial.write(26); // ASCII code of CTRL+Z to send SMS
+  delay(1000);
+}
+
+void makeCall() {
+  gsmSerial.println("ATD" + String(phoneNumber) + ";"); // Make a call
+  delay(1000);
+}
